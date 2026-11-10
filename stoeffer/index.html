@@ -1,0 +1,1230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BLE Live &mdash; Distributed CC2540 Monitor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root{
+    --ink:        #10141a;
+    --panel:      #171d26;
+    --panel-2:    #1d2530;
+    --grid:       #2a3340;
+    --text:       #e7ebf0;
+    --muted:      #8b96a5;
+    --amber:      #e8a33d;
+    --amber-dim:  #6a5730;
+    --teal:       #57c7c0;
+    --teal-dim:   #2c4d4a;
+    --coral:      #ef6461;
+    --purple:     #9b8cf2;
+    --purple-dim: #423a63;
+    --grey:       #6a7280;
+    --radius:     10px;
+  }
+  *{ box-sizing:border-box; }
+  html,body{
+    margin:0; height:100%; background:var(--ink); color:var(--text);
+    font-family:'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono{ font-family:'JetBrains Mono', monospace; }
+
+  /* ---------- layout ---------- */
+  #app{ display:flex; flex-direction:column; height:100vh; }
+
+  header{
+    display:flex; align-items:center; gap:20px;
+    padding:14px 22px; background:var(--panel);
+    border-bottom:1px solid var(--grid);
+    flex-shrink:0; flex-wrap:wrap;
+  }
+  header h1{
+    font-family:'Space Grotesk', sans-serif; font-weight:700;
+    font-size:19px; letter-spacing:0.02em; margin:0; color:var(--text);
+  }
+  header h1 span{ color:var(--amber); }
+  .subtitle{ font-size:12px; color:var(--muted); margin-top:2px; }
+  .header-left{ display:flex; flex-direction:column; margin-right:auto; }
+
+  .pill{
+    display:flex; align-items:center; gap:7px;
+    font-family:'JetBrains Mono', monospace; font-size:12px;
+    padding:6px 12px; border-radius:999px; background:var(--panel-2);
+    border:1px solid var(--grid); color:var(--muted); white-space:nowrap;
+  }
+  .pill .dot{ width:7px; height:7px; border-radius:50%; background:var(--muted); flex-shrink:0; }
+  .pill.ok .dot{ background:var(--teal); box-shadow:0 0 6px var(--teal); }
+  .pill.bad .dot{ background:var(--coral); }
+
+  .chan-strip{ display:flex; gap:8px; align-items:center; }
+  .chan{
+    display:flex; flex-direction:column; align-items:center; gap:4px;
+    font-family:'JetBrains Mono', monospace; font-size:10px; color:var(--muted);
+  }
+  .chan .lamp{
+    width:14px; height:14px; border-radius:50%;
+    background:var(--panel-2); border:1px solid var(--grid);
+    transition:background .15s, box-shadow .15s;
+  }
+  .chan .lamp.lit{ background:var(--amber); box-shadow:0 0 10px var(--amber); }
+
+  main{ display:flex; flex:1; min-height:0; }
+  #graph-pane{ flex:1 1 62%; position:relative; min-width:0; background:
+    radial-gradient(circle at 50% 50%, rgba(87,199,192,0.06), transparent 55%),
+    var(--ink); }
+  #graph{ position:absolute; inset:0; }
+  .graph-hint{
+  position:absolute; bottom:14px; left:18px; font-size:11px; color:var(--muted);
+  font-family:'JetBrains Mono', monospace; max-width:460px; line-height:1.6;
+  background:rgba(23,29,38,0.92); padding:9px 13px 9px 34px; border-radius:8px;
+  border:1px solid var(--grid);
+  transition:opacity .15s ease, transform .15s ease;
+}
+/* collapsed: shrink to just the toggle tab, hide the legend body */
+.graph-hint.collapsed{ padding:0; background:transparent; border:none; }
+.graph-hint.collapsed .legend-body{
+  opacity:0; pointer-events:none; transform:translateY(4px);
+}
+.graph-hint.collapsed:hover .legend-body,
+.graph-hint.pinned .legend-body{
+  opacity:1; pointer-events:auto; transform:none;
+}
+.graph-hint.collapsed:hover,
+.graph-hint.pinned{
+  padding:9px 13px 9px 34px; background:rgba(23,29,38,0.92); border:1px solid var(--grid);
+}
+.legend-body{ transition:opacity .15s ease, transform .15s ease; }
+.legend-row{ display:flex; align-items:center; gap:8px; margin-bottom:4px; }
+.legend-row:last-child{ margin-bottom:0; }
+.swatch{ display:inline-block; width:11px; height:11px; flex-shrink:0; }
+.swatch.line{ width:16px; height:0; border-radius:0; }
+.legend-toggle{
+  position:absolute; top:6px; left:6px; width:22px; height:22px;
+  border-radius:6px; background:var(--panel-2); border:1px solid var(--grid);
+  color:var(--muted); font-family:'JetBrains Mono', monospace; font-size:12px;
+  font-weight:700; display:flex; align-items:center; justify-content:center;
+  cursor:pointer; user-select:none; z-index:2;
+}
+.legend-toggle:hover{ color:var(--text); border-color:var(--amber); }
+.graph-hint.pinned .legend-toggle{ color:var(--amber); border-color:var(--amber); }
+
+  /* "Highlight..." picker -- selecting a device/connection/scan glows that
+     item on the radar (amber ring / brighter edge) and fades everything
+     else, so a specific item is easy to pick out of a busy graph without
+     hunting for it visually. Mirrors the legend-toggle's corner anchoring,
+     on the opposite side. */
+  .focus-bar{
+    position:absolute; top:6px; right:6px; z-index:3;
+    display:flex; gap:6px; align-items:center; max-width:min(62%, 320px);
+  }
+  .focus-bar select{
+    flex:1; min-width:0; font-family:'JetBrains Mono', monospace; font-size:11px;
+    background:rgba(23,29,38,0.92); color:var(--text); border:1px solid var(--grid);
+    border-radius:6px; padding:5px 8px; cursor:pointer;
+  }
+  .focus-bar select:focus{ outline:none; border-color:var(--amber); }
+  .focus-bar optgroup{ font-style:normal; font-weight:700; color:var(--muted); }
+  .focus-bar option{ color:var(--text); background:var(--panel-2); }
+  #focus-clear{
+    flex-shrink:0; width:22px; height:22px; border-radius:6px;
+    background:var(--panel-2); border:1px solid var(--grid); color:var(--muted);
+    font-size:15px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center;
+  }
+  #focus-clear:hover{ color:var(--coral); border-color:var(--coral); }
+  .graph-empty{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    color:var(--muted); font-size:13px; flex-direction:column; gap:8px; text-align:center; padding:20px;
+    pointer-events:none;
+  }
+  .graph-empty b{ color:var(--text); font-family:'Space Grotesk', sans-serif; }
+
+  #sidebar{
+    flex:1 1 38%; max-width:460px; min-width:300px;
+    display:flex; flex-direction:column; border-left:1px solid var(--grid);
+    background:var(--panel); overflow:hidden;
+  }
+  .panel-section{ display:flex; flex-direction:column; min-height:0; }
+  .panel-section.devices{ flex:1.3; border-bottom:1px solid var(--grid); }
+  .panel-section.conns{ flex:1; }
+
+  .panel-head{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; border-bottom:1px solid var(--grid); flex-shrink:0;
+  }
+  .panel-head h2{
+    font-family:'Space Grotesk', sans-serif; font-size:13px; font-weight:600;
+    margin:0; letter-spacing:0.03em; text-transform:uppercase; color:var(--muted);
+  }
+  .count-badge{
+    font-family:'JetBrains Mono', monospace; font-size:11px; color:var(--ink);
+    background:var(--amber); padding:1px 8px; border-radius:999px; font-weight:700;
+  }
+  .panel-section.conns .count-badge{ background:var(--teal); }
+
+  .scroll-body{ overflow-y:auto; flex:1; min-height:0; }
+  table{ width:100%; border-collapse:collapse; font-size:12px; }
+  thead th{
+    position:sticky; top:0; background:var(--panel);
+    text-align:left; padding:8px 14px; color:var(--muted);
+    font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:0.04em;
+    border-bottom:1px solid var(--grid);
+  }
+  thead th[data-sort]{ cursor:pointer; user-select:none; white-space:nowrap; }
+  thead th[data-sort]:hover{ color:var(--text); }
+  thead th[data-sort] .sort-arrow{ display:inline-block; width:8px; opacity:0.7; font-size:9px; }
+  thead th[data-sort]:not(.sort-asc):not(.sort-desc) .sort-arrow{ opacity:0.25; }
+  tbody td{ padding:8px 14px; border-bottom:1px solid rgba(42,51,64,0.5); vertical-align:middle; }
+  tbody tr{ cursor:pointer; }
+  tbody tr:hover{ background:var(--panel-2); }
+  tbody tr.stale{ opacity:0.45; }
+  tbody tr.selected{ background:rgba(232,163,61,0.14) !important; opacity:1; box-shadow:inset 3px 0 0 var(--amber); }
+  tbody tr.selected:hover{ background:rgba(232,163,61,0.2) !important; }
+  tbody tr.fresh-flash{ animation: flashrow 1.1s ease-out; }
+  @keyframes flashrow{ from{ background:rgba(232,163,61,0.28);} to{ background:transparent; } }
+
+  .addr{ font-family:'JetBrains Mono', monospace; font-size:11.5px; color:var(--text); }
+  .name{ color:var(--text); font-weight:500; }
+  .name.unknown{ color:var(--muted); font-style:italic; font-weight:400; }
+  /* A guessed identity (vendor/device-type/Continuity frame, e.g.
+     "iPhone/iPad(nearby)") -- distinct from a real advertised name so
+     the two are never confused for one another. */
+  .name.guess{ color:var(--amber); font-weight:500; }
+  .name.guess .guess-tag{
+    font-family:'JetBrains Mono', monospace; font-size:9px; font-weight:700;
+    color:var(--ink); background:var(--amber); border-radius:4px;
+    padding:0 4px; margin-right:5px; vertical-align:middle; letter-spacing:0.02em;
+  }
+  .badge-role{
+    display:inline-block; font-size:9.5px; font-family:'JetBrains Mono', monospace;
+    padding:1px 6px; border-radius:5px; margin-left:6px; vertical-align:middle;
+  }
+  .badge-role.conn{ background:var(--teal-dim); color:var(--teal); }
+  .badge-role.scanner{ background:var(--purple-dim); color:var(--purple); }
+  .badge-pdu{
+    display:inline-block; font-size:9px; font-family:'JetBrains Mono', monospace;
+    padding:1px 5px; border-radius:4px; margin-left:6px; vertical-align:middle;
+    background:var(--panel-2); border:1px solid var(--grid); color:var(--muted);
+  }
+  .badge-kind{
+    display:inline-block; font-size:9.5px; font-family:'JetBrains Mono', monospace;
+    padding:1px 7px; border-radius:5px; font-weight:700;
+  }
+  .badge-kind.kind-conn{ background:var(--teal-dim); color:var(--teal); }
+  .badge-kind.kind-scan{ background:var(--purple-dim); color:var(--purple); }
+
+  /* Connection lifecycle state, shown alongside the CONN kind badge:
+     seen (CONNECT_REQ heard only) -> following (Sniffle is actively on the
+     data channel, heartbeats arriving) -> quiet (was followed, heartbeats
+     lagging) -> ended (terminated / lost). This is what makes a followed
+     connection visibly different from one that's just been glimpsed. */
+  .badge-state{
+    display:inline-block; font-size:9px; font-family:'JetBrains Mono', monospace;
+    padding:1px 6px; border-radius:5px; margin-left:5px; vertical-align:middle;
+    font-weight:700; letter-spacing:0.02em;
+  }
+  .badge-state.state-seen{ background:var(--panel-2); border:1px solid var(--grid); color:var(--muted); }
+  .badge-state.state-following{ background:var(--teal); color:var(--ink); box-shadow:0 0 6px rgba(87,199,192,0.5); }
+  .badge-state.state-quiet{ background:var(--teal-dim); color:var(--teal); }
+  .badge-state.state-ended{ background:var(--panel-2); border:1px solid var(--grid); color:var(--coral); }
+
+  .rssi-wrap{ display:flex; align-items:center; gap:6px; }
+  .rssi-bar{ width:44px; height:5px; background:var(--grid); border-radius:3px; overflow:hidden; }
+  .rssi-bar > i{ display:block; height:100%; background:var(--amber); }
+  .rssi-val{ font-family:'JetBrains Mono', monospace; font-size:11px; color:var(--muted); min-width:34px; }
+
+  .empty-row td{ text-align:center; color:var(--muted); padding:26px 14px; font-size:12px; }
+
+  footer{
+    padding:7px 22px; font-size:10.5px; color:var(--muted); background:var(--panel);
+    border-top:1px solid var(--grid); font-family:'JetBrains Mono', monospace; flex-shrink:0;
+  }
+
+  @media (max-width:900px){
+    /* Below this width the whole page becomes one normal, scrollable
+       document instead of a fixed-height split: the radar gets a square
+       pane sized to the screen width (so the full circle shows, nothing
+       clipped or squashed), and the devices/connections tables flow
+       beneath it at their natural height -- scroll down to reach them,
+       instead of each hunting for room inside its own tiny internal
+       scroll box. */
+    html, body{ height:auto; min-height:100%; }
+    #app{ height:auto; min-height:100vh; }
+    main{ flex-direction:column; flex:none; }
+
+    #graph-pane{
+      flex:none; width:100%;
+      aspect-ratio:1/1; max-height:min(100vw, 78vh);
+    }
+
+    #sidebar{
+      max-width:none; min-width:0; border-left:none; border-top:1px solid var(--grid);
+      flex:none; height:auto; overflow:visible;
+    }
+    .panel-section{ flex:none; min-height:0; }
+    .panel-section.devices{ border-bottom:1px solid var(--grid); }
+    /* Tables grow to fit their rows; the page scrolls, not the panel. */
+    .scroll-body{ overflow-y:visible; flex:none; max-height:none; }
+    /* Table header row still sticks to the top of the viewport as its
+       own section scrolls by, now anchored to the page rather than a
+       (now nonexistent) inner scroll box. */
+    thead th{ top:0; }
+
+    .graph-hint{ max-width:calc(100% - 40px); }
+  }
+
+  @media (max-width:480px){
+    /* Smallest phones: trim padding/gaps and let the header wrap onto a
+       couple of lines instead of crowding everything onto one. */
+    header{ padding:10px 14px; gap:10px 14px; }
+    header h1{ font-size:17px; }
+    .pill{ padding:5px 10px; font-size:11px; }
+    .panel-head{ padding:9px 12px; }
+    thead th{ padding:7px 10px; font-size:10px; }
+    tbody td{ padding:7px 10px; }
+    footer{ padding:7px 14px; font-size:10px; }
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    tbody tr.fresh-flash{ animation:none; }
+    .chan .lamp{ transition:none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="header-left">
+      <h1>BLE <span>LIVE</span></h1>
+      <div class="subtitle">Distributed CC2540 monitor &middot; RSSI radar view</div>
+    </div>
+
+    <div class="chan-strip" title="Flashes when a sniffer reports activity on that advertising channel">
+      <div class="chan"><div class="lamp" id="lamp-37"></div>37</div>
+      <div class="chan"><div class="lamp" id="lamp-38"></div>38</div>
+      <div class="chan"><div class="lamp" id="lamp-39"></div>39</div>
+    </div>
+
+    <div class="pill" id="ws-pill"><span class="dot"></span><span id="ws-status">connecting&hellip;</span></div>
+    <div class="pill"><span class="dot" style="background:var(--amber)"></span><span id="device-count">0</span>&nbsp;devices</div>
+    <div class="pill"><span class="dot" style="background:var(--teal)"></span><span id="conn-count">0</span>&nbsp;connections</div>
+    <div class="pill"><span class="dot" style="background:var(--purple)"></span><span id="scan-count">0</span>&nbsp;scans</div>
+  </header>
+
+  <main>
+    <div id="graph-pane">
+      <div id="graph"></div>
+      <div class="graph-empty" id="graph-empty">
+        <b>Waiting for traffic&hellip;</b>
+        <div>Start one <span class="mono">ccsniffpiper_zmq.py --zmq-pub</span> instance per<br/>dongle and point this dashboard at their <span class="mono">--source</span> addresses.</div>
+      </div>
+      <div class="focus-bar">
+        <select id="focus-select" title="Highlight a device, connection or scan on the radar">
+          <option value="">Highlight&hellip;</option>
+          <optgroup label="Devices (closest first)" id="focus-devices-group"></optgroup>
+          <optgroup label="Connections" id="focus-conns-group"></optgroup>
+          <optgroup label="Scans" id="focus-scans-group"></optgroup>
+        </select>
+        <button id="focus-clear" title="Clear highlight" style="display:none;">&times;</button>
+      </div>
+      <div class="graph-hint collapsed" id="graph-hint">
+  <div class="legend-toggle" id="legend-toggle" title="Click to pin/unpin legend">?</div>
+  <div class="legend-body">
+    <div class="legend-row"><span class="swatch" style="background:#e8a33d; border-radius:50%;"></span> ADV_IND &mdash; undirected, connectable</div>
+    <div class="legend-row"><span class="swatch" style="background:#f0b95e; clip-path:polygon(50% 0,0 100%,100% 100%);"></span> ADV_DIRECT_IND &mdash; directed, connectable</div>
+    <div class="legend-row"><span class="swatch" style="background:#6a7280;"></span> ADV_NONCONN_IND &mdash; not connectable</div>
+    <div class="legend-row"><span class="swatch" style="background:#9b8cf2; clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);"></span> ADV_SCAN_IND &mdash; scannable only</div>
+    <div class="legend-row"><span class="swatch" style="background:#57c7c0; border-radius:50%;"></span> device is currently connected</div>
+    <div class="legend-row"><span class="swatch" style="background:#e7ebf0; clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);"></span> SNIFFER &mdash; center reference point</div>
+    <div style="margin-top:3px; opacity:0.8;">dim / faded fill = stale (not seen in a while) &middot; smaller dot = scanner-only device, no adverts seen</div>
+    <div class="legend-row" style="margin-top:6px;"><span class="swatch line" style="border-top:3px solid #57c7c0;"></span> connection &mdash; FOLLOWING (Sniffle on the data channel)</div>
+    <div class="legend-row"><span class="swatch line" style="border-top:1.5px solid #357872;"></span> connection &mdash; QUIET (followed, heartbeat lagging)</div>
+    <div class="legend-row"><span class="swatch line" style="border-top:1.5px dashed #3a8f8a;"></span> connection &mdash; SEEN (CONNECT_REQ only, not followed)</div>
+    <div style="margin-top:3px; opacity:0.8;">a connection stays visible for as long as it's followed, not on a fixed timer; ENDED connections drop off the graph but linger, greyed out, in the sidebar list</div>
+    <div class="legend-row"><span class="swatch line" style="border-top:2px dashed #9b8cf2;"></span> scan &mdash; response seen</div>
+    <div class="legend-row"><span class="swatch line" style="border-top:2px dashed #4a4460;"></span> scan &mdash; request only, no response</div>
+    <div style="margin-top:5px; opacity:0.8;">radius from center &asymp; signal strength (closer = stronger RSSI), not a real distance</div>
+    <div style="margin-top:3px; opacity:0.8;"><span class="guess-tag" style="font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:700;color:var(--ink);background:var(--amber);border-radius:4px;padding:0 4px;">ID</span> = guessed from vendor/manufacturer data, not an advertised name</div>
+    <div class="legend-row" style="margin-top:6px;"><span class="swatch" style="background:transparent; border:2.5px solid #e8a33d; border-radius:50%; box-shadow:0 0 5px #e8a33d;"></span> highlighted via the "Highlight&hellip;" picker &mdash; everything else dims</div>
+  </div>
+</div>
+    </div>
+
+    <div id="sidebar">
+      <div class="panel-section devices">
+        <div class="panel-head">
+          <h2>Devices</h2>
+          <span class="count-badge" id="devices-badge">0</span>
+        </div>
+        <div class="scroll-body">
+          <table>
+            <thead>
+              <tr id="devices-head-row">
+                <th data-sort="addr">Address<span class="sort-arrow"></span></th>
+                <th data-sort="name">Name / ID<span class="sort-arrow"></span></th>
+                <th data-sort="rssi">RSSI<span class="sort-arrow"></span></th>
+                <th data-sort="channel">Ch<span class="sort-arrow"></span></th>
+                <th data-sort="age_sec">Last seen<span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="devices-body">
+              <tr class="empty-row"><td colspan="5">No devices yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel-section conns">
+        <div class="panel-head">
+          <h2>Connections &amp; Scans</h2>
+          <span class="count-badge" id="conns-badge">0</span>
+        </div>
+        <div class="scroll-body">
+          <table>
+            <thead>
+              <tr><th>Kind</th><th>Endpoints</th><th>Detail</th><th>Age</th></tr>
+            </thead>
+            <tbody id="conns-body">
+              <tr class="empty-row"><td colspan="4">No connections or scans yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    CONNECT_REQ gives the access address / hop increment / channel map recipe for a connection &mdash; actually following it onto the data channels needs additional hardware synced to that recipe.
+  </footer>
+</div>
+
+<script>
+(function(){
+
+  // ---------------------------------------------------------------------
+  // Config
+  // ---------------------------------------------------------------------
+  const params = new URLSearchParams(location.search);
+  const WS_URL = params.get('ws') ||
+    ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+
+  const FRESH_SEC = 8;      // "fresh" styling window
+
+  // RSSI -> radar radius
+  const MIN_RADIUS = 45;    // strongest signal, closest to center
+  const MAX_RADIUS = 300;   // weakest signal / unknown, pushed to the rim
+  const RSSI_NEAR = -35;    // dBm treated as "very close"
+  const RSSI_FAR  = -80;    // dBm treated as "at the edge of range" -- pulled in from
+                             // -95: real devices are essentially never heard weaker
+                             // than this with a CC2540, so the old cutoff wasted the
+                             // outer part of the circle. Devices now spread across the
+                             // *whole* radius instead of bunching near the center.
+
+  // Angle collision avoidance -------------------------------------------
+  // Radius always comes straight from RSSI (that's the signal being shown).
+  // Angle starts random per device and is only nudged when two devices would
+  // land within MIN_SEP_PX pixels of each other *and* their RSSI is within
+  // RSSI_ANGLE_GUARD_DB dB -- past that gap, the radius difference alone is
+  // already enough to keep them visually apart.
+  const MIN_SEP_PX = 34;          // roughly one dot's diameter plus a small gap
+  const RSSI_ANGLE_GUARD_DB = 10;
+  const MAX_LAYOUT_PASSES = 10;
+
+  // ---------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------
+  function rfToAdvChannel(rf){
+    if (rf === null || rf === undefined) return null;
+    if (rf === 0) return 37;
+    if (rf === 12) return 38;
+    if (rf === 39) return 39;
+    return rf; // shouldn't normally happen for this sniffer
+  }
+  function fmtChannel(rf){
+    const ch = rfToAdvChannel(rf);
+    return ch === null ? '&mdash;' : String(ch);
+  }
+
+  function shortAddr(addr){
+    if (!addr) return '??:??';
+    const parts = addr.split(':');
+    return parts.slice(-2).join(':');
+  }
+
+  // A real advertised name always wins. Failing that, fall back to the
+  // best-guess identity the aggregator derived from manufacturer data
+  // (ble_identify.py on the backend: vendor + Apple Continuity frame type,
+  // e.g. "iPhone/iPad(nearby)"). `display` already encodes this priority
+  // server-side (name -> label -> MAC); we still check `name` separately
+  // here so the UI can tell a *real* name from a *guessed* one.
+  function identityFor(d){
+    if (d.name) return { text: d.name, guessed: false };
+    if (d.label) return { text: d.label, guessed: true };
+    return { text: null, guessed: false };
+  }
+
+  // Same name > guessed-label > nothing priority as identityFor(), but for a
+  // connection endpoint where we only have the aggregator's flattened
+  // init_name/init_label (or adv_name/adv_label) fields rather than a full
+  // device object -- used so the connection list can show "Name (AA:BB)"
+  // instead of the endpoint reverting to a bare access address the moment
+  // a CONNECT_REQ is seen.
+  function connEndpointIdentity(name, label){
+    if (name) return { text: name, guessed: false };
+    if (label) return { text: label, guessed: true };
+    return { text: null, guessed: false };
+  }
+
+  // "Name (AA:BB)" when a name/guess is known, else just the short address.
+  function endpointDisplay(name, label, addr){
+    const id = connEndpointIdentity(name, label);
+    const short = shortAddr(addr);
+    if (!id.text) return '<span class="addr">' + escapeHtml(short) + '</span>';
+    const nameSpan = '<span class="' + (id.guessed ? 'name guess' : 'name') + '">' +
+      (id.guessed ? '<span class="guess-tag">ID</span>' : '') + escapeHtml(id.text) + '</span>';
+    return nameSpan + ' <span class="addr" style="opacity:0.65;">(' + escapeHtml(short) + ')</span>';
+  }
+
+  // Connection state -> short badge label + CSS modifier class.
+  const CONN_STATE_META = {
+    seen:      { label: 'SEEN',      cls: 'state-seen'      },
+    following: { label: 'FOLLOWING', cls: 'state-following' },
+    quiet:     { label: 'QUIET',     cls: 'state-quiet'     },
+    ended:     { label: 'ENDED',     cls: 'state-ended'     },
+  };
+  function connStateBadge(state){
+    const meta = CONN_STATE_META[state] || CONN_STATE_META.seen;
+    return '<span class="badge-state ' + meta.cls + '">' + meta.label + '</span>';
+  }
+
+  function rssiToPct(rssi){
+    if (rssi === null || rssi === undefined) return 0;
+    const pct = (rssi + 100) / 70 * 100;
+    return Math.max(4, Math.min(100, pct));
+  }
+
+  function rssiToRadius(rssi){
+    if (rssi === null || rssi === undefined) return MAX_RADIUS;
+    const clamped = Math.max(RSSI_FAR, Math.min(RSSI_NEAR, rssi));
+    const t = (clamped - RSSI_FAR) / (RSSI_NEAR - RSSI_FAR); // 0=far, 1=near
+    const curved = Math.pow(t, 0.7); // RSSI is log-scale vs distance; spread weak signals out a bit more
+    return MAX_RADIUS - curved * (MAX_RADIUS - MIN_RADIUS);
+  }
+
+  // Angle assigned once per address (random), then cached, so a device
+  // doesn't spin around on every snapshot for no reason -- it only moves
+  // when resolveLayout() below decides it has to.
+  const deviceAngles = new Map(); // addr -> radians
+  function angleForAddr(addr){
+    if (!deviceAngles.has(addr)){
+      deviceAngles.set(addr, Math.random() * Math.PI * 2);
+    }
+    return deviceAngles.get(addr);
+  }
+
+  // Resolves on-screen positions for every device this frame. Radius is
+  // always derived straight from RSSI. Angle starts from whatever was last
+  // used (or a fresh random value for a brand-new device) and is nudged
+  // just enough, pass by pass, to open a MIN_SEP_PX gap between any two
+  // devices that are both close on screen *and* close in RSSI (< 
+  // RSSI_ANGLE_GUARD_DB apart) -- those are the pairs that would otherwise
+  // sit on top of each other. Devices further apart in signal strength
+  // already get enough radial separation from rssiToRadius() alone, so
+  // their angles are left untouched. Resolved angles are written back into
+  // deviceAngles so a device stays put next frame unless a new arrival (or
+  // another device's RSSI changing) forces another nudge -- that's fine,
+  // per the brief devices can move around if new BLE traffic appears.
+  function resolveLayout(devices){
+    const items = devices.map(d => ({
+      addr: d.addr,
+      rssi: (d.rssi === null || d.rssi === undefined) ? RSSI_FAR : d.rssi,
+      radius: rssiToRadius(d.rssi),
+      angle: angleForAddr(d.addr),
+    }));
+
+    for (let pass = 0; pass < MAX_LAYOUT_PASSES; pass++){
+      let adjusted = false;
+
+      for (let i = 0; i < items.length; i++){
+        for (let j = i + 1; j < items.length; j++){
+          const a = items[i], b = items[j];
+          if (Math.abs(a.rssi - b.rssi) >= RSSI_ANGLE_GUARD_DB) continue;
+
+          const ax = a.radius * Math.cos(a.angle), ay = a.radius * Math.sin(a.angle);
+          const bx = b.radius * Math.cos(b.angle), by = b.radius * Math.sin(b.angle);
+          const dist = Math.hypot(bx - ax, by - ay);
+          if (dist >= MIN_SEP_PX) continue;
+
+          adjusted = true;
+          const avgRadius = Math.max(1, (a.radius + b.radius) / 2);
+          // Small-angle approximation of the arc needed to open a
+          // MIN_SEP_PX gap at this radius, capped so one pass never
+          // whips a device more than 60 degrees around the ring.
+          const needed = Math.min(Math.PI / 3, MIN_SEP_PX / avgRadius);
+
+          let diff = b.angle - a.angle;
+          diff = Math.atan2(Math.sin(diff), Math.cos(diff)); // normalize to [-pi, pi]
+          const sign = diff === 0 ? (Math.random() < 0.5 ? 1 : -1) : Math.sign(diff);
+
+          a.angle -= sign * needed / 2;
+          b.angle += sign * needed / 2;
+        }
+      }
+
+      if (!adjusted) break;
+    }
+
+    const positions = new Map();
+    items.forEach(it => {
+      deviceAngles.set(it.addr, it.angle); // persist for next frame
+      positions.set(it.addr, { x: it.radius * Math.cos(it.angle), y: it.radius * Math.sin(it.angle) });
+    });
+    return positions;
+  }
+
+  function fmtAge(sec){
+    if (sec < 1) return 'now';
+    if (sec < 60) return sec.toFixed(0) + 's';
+    return (sec / 60).toFixed(1) + 'm';
+  }
+
+  function escapeHtml(s){
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------------------------------------------------------------------
+  // PDU type -> node shape/color
+  // ---------------------------------------------------------------------
+  const PDU_STYLE = {
+    'ADV_IND':         { shape: 'dot',      fresh: '#e8a33d', stale: '#6a5730', border: '#f5c887' },
+    'ADV_DIRECT_IND':  { shape: 'triangle', fresh: '#f0b95e', stale: '#755f30', border: '#f8d19a' },
+    'ADV_NONCONN_IND': { shape: 'square',   fresh: '#6a7280', stale: '#3d4148', border: '#9aa2ad' },
+    'ADV_SCAN_IND':    { shape: 'diamond',  fresh: '#9b8cf2', stale: '#423a63', border: '#c6bcf9' },
+    'SCAN_REQ': { shape: 'dot', fresh: '#ef4444', stale: '#7f1d1d', border: '#fca5a5' },
+    'SCAN_RSP': { shape: 'dot', fresh: '#22c55e', stale: '#14532d', border: '#86efac' },
+  
+  };
+  const DEFAULT_PDU_STYLE = PDU_STYLE['ADV_IND'];
+
+  // ---------------------------------------------------------------------
+  // Graph (vis-network)
+  // ---------------------------------------------------------------------
+  const nodes = new vis.DataSet([]);
+  const edges = new vis.DataSet([]);
+  const network = new vis.Network(document.getElementById('graph'), {nodes, edges}, {
+  
+    autoResize: true,
+    physics: { enabled: false },
+    interaction: { hover: true, tooltipDelay: 120, dragNodes: false },
+    nodes: {
+      shape: 'dot',
+      font: { color: '#e7ebf0', face: 'JetBrains Mono', size: 11 },
+      borderWidth: 2,
+    },
+    edges: {
+      color: { color: '#57c7c0', highlight: '#57c7c0' },
+      font: { color: '#8b96a5', face: 'JetBrains Mono', size: 9, strokeWidth: 0, align: 'middle' },
+      smooth: { type: 'continuous' },
+      arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+    },
+  });
+  const legendEl = document.getElementById('graph-hint');
+const legendToggle = document.getElementById('legend-toggle');
+legendToggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const pinned = legendEl.classList.toggle('pinned');
+  legendEl.classList.toggle('collapsed', !pinned);
+});
+function fitRadar(){
+  const el = document.getElementById('graph');
+  const w = el.clientWidth, h = el.clientHeight;
+  if (!w || !h) return;
+  const margin = 30; // px of breathing room so the outer ring isn't clipped
+  const scale = (Math.min(w, h) / 2 - margin) / MAX_RADIUS;
+  network.moveTo({ position: { x: 0, y: 0 }, scale, animation: false });
+}
+
+// run once now, once after layout settles, and again on resize
+fitRadar();
+window.addEventListener('resize', fitRadar);
+network.once('afterDrawing', fitRadar);
+  // Fixed center node representing the sniffer array (reference point for RSSI radius)
+  nodes.add({
+    id: '__center__',
+    label: 'SNIFFER',
+    shape: 'diamond',
+    size: 18,
+    color: { background: '#e7ebf0', border: '#57c7c0' },
+    font: { color: '#10141a', size: 10 },
+    fixed: { x: true, y: true },
+    physics: false,
+    x: 0, y: 0,
+    title: 'Reference point for RSSI radius (approximate, not true distance)',
+  });
+
+  // Range rings, drawn under the nodes
+  network.on('beforeDrawing', function(ctx){
+    const rings = [-40, -55, -70, -80];
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    rings.forEach(rssi => {
+      const r = rssiToRadius(rssi);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(139,150,165,0.22)';
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(139,150,165,0.55)';
+      ctx.font = '10px JetBrains Mono';
+      ctx.fillText(rssi + ' dBm', 4, -r + 12);
+    });
+    ctx.restore();
+  });
+
+  // Currently highlighted item from the "Highlight..." picker (or a table
+  // row click -- see selectedDeviceAddr below), or null for no highlight.
+  // { type: 'device', value: <addr> } | { type: 'conn'|'scan', value: <edge id> }
+  let focus = null;
+
+  function nodeStyleFor(dev, now){
+    const age = now - dev.last_seen;
+    const fresh = age < FRESH_SEC;
+    if (dev.connected){
+      return {
+        shape: 'dot',
+        color: { background: fresh ? '#57c7c0' : '#2c4d4a', border: '#9fe6e1' },
+        size: 16,
+      };
+    }
+    const pdu = PDU_STYLE[dev.pdu_type] || DEFAULT_PDU_STYLE;
+    return {
+      shape: pdu.shape,
+      color: { background: fresh ? pdu.fresh : pdu.stale, border: pdu.border },
+      size: dev.scanner && !dev.pdu_type ? 10 : 12,
+    };
+  }
+
+  function updateGraph(devices, connections, scans){
+    const now = Date.now() / 1000;
+    const positions = resolveLayout(devices);
+
+    // Which node ids / edge ids the current "Highlight..." selection covers.
+    // Everything else gets dimmed so the picked item stands out. A device
+    // focus also lights up any connection/scan edge touching it, so e.g.
+    // picking a nearby Apple device shows at a glance whether it's mid-scan
+    // or connected to something.
+    let focusNodeIds = null, focusEdgeIds = null;
+    if (focus){
+      focusNodeIds = new Set();
+      focusEdgeIds = new Set();
+      if (focus.type === 'device'){
+        focusNodeIds.add(focus.value);
+        connections.filter(c => c.state !== 'ended').forEach(c => {
+          if (c.init_addr === focus.value || c.adv_addr === focus.value) focusEdgeIds.add('conn:' + c.access_address);
+        });
+        (scans || []).forEach(s => {
+          if (s.scanner_addr === focus.value || s.adv_addr === focus.value) focusEdgeIds.add('scan:' + s.scanner_addr + '>' + s.adv_addr);
+        });
+      } else if (focus.type === 'conn'){
+        const c = connections.find(cc => 'conn:' + cc.access_address === focus.value);
+        focusEdgeIds.add(focus.value);
+        if (c){ focusNodeIds.add(c.init_addr); focusNodeIds.add(c.adv_addr); }
+      } else if (focus.type === 'scan'){
+        const s = (scans || []).find(ss => 'scan:' + ss.scanner_addr + '>' + ss.adv_addr === focus.value);
+        focusEdgeIds.add(focus.value);
+        if (s){ focusNodeIds.add(s.scanner_addr); focusNodeIds.add(s.adv_addr); }
+      }
+    }
+    const DIM_NODE = 0.18, DIM_EDGE = 0.12;
+
+    const nodeUpdates = devices.map(d => {
+      const style = nodeStyleFor(d, now);
+      const identity = identityFor(d);
+      const label = identity.text ? identity.text : shortAddr(d.addr);
+      const { x, y } = positions.get(d.addr) || { x: 0, y: 0 };
+      const tip = [
+        '<b>' + escapeHtml(d.addr) + '</b>',
+        identity.text
+          ? (identity.guessed ? 'guessed id: ' : 'name: ') + escapeHtml(identity.text)
+          : null,
+        d.vendor ? 'vendor: ' + escapeHtml(d.vendor) : null,
+        (d.frame_types && d.frame_types.length) ? 'frames: ' + escapeHtml(d.frame_types.join(', ')) : null,
+        'rssi: ' + (d.rssi ?? '?') + ' dBm',
+        d.pdu_type ? 'pdu: ' + escapeHtml(d.pdu_type) : null,
+        'adv channel: ' + fmtChannel(d.channel).replace('&mdash;', 'unknown'),
+        d.source ? 'source: ' + escapeHtml(d.source) : null,
+        d.scanner ? 'seen scanning (SCAN_REQ)' : null,
+        'last seen: ' + fmtAge(d.age_sec) + ' ago',
+      ].filter(Boolean).join('<br/>');
+
+      // Highlight styling: keep the node's own semantic color (connected /
+      // stale / PDU type) but ring it in amber and pop its shadow when it's
+      // the focused item; fade everything else instead of recoloring it, so
+      // the underlying meaning of each color is still readable.
+      const isFocused = focusNodeIds && focusNodeIds.has(d.addr);
+      const isDimmed = focusNodeIds && !isFocused;
+      const focusExtras = focusNodeIds ? {
+        opacity: isFocused ? 1 : DIM_NODE,
+        borderWidth: isFocused ? 4 : (style.borderWidth || 2),
+        color: Object.assign({}, style.color, isFocused ? { border: '#e8a33d' } : {}),
+        shadow: isFocused
+          ? { enabled: true, color: 'rgba(232,163,61,0.75)', size: 16, x: 0, y: 0 }
+          : { enabled: false },
+      } : { opacity: 1, shadow: { enabled: false } };
+
+      return Object.assign({
+        id: d.addr,
+        label: label.length > 18 ? label.slice(0, 17) + '\u2026' : label,
+        title: tip,
+        x, y,
+      }, style, focusExtras);
+    });
+
+    // 'ended' connections are dropped from the graph (not the sidebar list)
+    // as soon as they end: their endpoint devices are no longer protected
+    // from expiry by the aggregator once a connection has ended, so an
+    // edge could otherwise end up pointing at a node that's about to
+    // disappear. The sidebar keeps them, greyed out, until --ended-ttl.
+    const connEdgeUpdates = connections
+      .filter(c => c.state !== 'ended')
+      .map(c => {
+        // seen: CONNECT_REQ heard but Sniffle isn't (yet/anymore) following
+        //   the data channel -- thin, dashed, dim.
+        // following: Sniffle is actively on the data channel and heartbeats
+        //   are arriving on schedule -- thick, solid, bright. This is the
+        //   state that used to be invisible entirely.
+        // quiet: was being followed but heartbeats have lagged past their
+        //   normal cadence (not yet timed out) -- solid, thinner, dimmer.
+        const styleByState = {
+          seen:      { dashes: [4, 4], width: 1.5, color: '#3a8f8a' },
+          following: { dashes: false,  width: 3,   color: '#57c7c0' },
+          quiet:     { dashes: false,  width: 1.5, color: '#357872' },
+        };
+        const st = styleByState[c.state] || styleByState.seen;
+        const initId = connEndpointIdentity(c.init_name, c.init_label);
+        const advId = connEndpointIdentity(c.adv_name, c.adv_label);
+        const tip = [
+          '<b>' + (CONN_STATE_META[c.state] || CONN_STATE_META.seen).label + '</b>',
+          (initId.text ? escapeHtml(initId.text) : shortAddr(c.init_addr)) + ' &rarr; ' +
+            (advId.text ? escapeHtml(advId.text) : shortAddr(c.adv_addr)),
+          '<span class="mono">' + escapeHtml(c.access_address) + '</span>',
+          'hop ' + c.hop_increment + ' \u00b7 ' + c.num_used_channels + '/37 channels',
+          'duration: ' + fmtAge(c.duration_sec),
+          c.stats && c.stats.rssi_central != null ? 'central rssi: ' + c.stats.rssi_central + ' dBm' : null,
+          c.stats && c.stats.rssi_peripheral != null ? 'peripheral rssi: ' + c.stats.rssi_peripheral + ' dBm' : null,
+          c.end_reason ? 'ended: ' + escapeHtml(c.end_reason) : null,
+        ].filter(Boolean).join('<br/>');
+
+        const edgeId = 'conn:' + c.access_address;
+        const isFocused = focusEdgeIds && focusEdgeIds.has(edgeId);
+        return {
+          id: edgeId,
+          from: c.init_addr,
+          to: c.adv_addr,
+          dashes: st.dashes,
+          width: isFocused ? st.width + 2 : st.width,
+          color: { color: st.color, opacity: focusEdgeIds ? (isFocused ? 1 : DIM_EDGE) : 1 },
+          shadow: isFocused ? { enabled: true, color: 'rgba(232,163,61,0.6)', size: 10 } : { enabled: false },
+          title: tip,
+          label: (c.state === 'following' ? '\u25cf ' : '') +
+            'hop ' + c.hop_increment + ' \u00b7 ' + c.num_used_channels + 'ch',
+        };
+      });
+
+    const scanEdgeUpdates = (scans || []).map(s => {
+      const edgeId = 'scan:' + s.scanner_addr + '>' + s.adv_addr;
+      const isFocused = focusEdgeIds && focusEdgeIds.has(edgeId);
+      return {
+        id: edgeId,
+        from: s.scanner_addr,
+        to: s.adv_addr,
+        dashes: [4, 4],
+        width: isFocused ? 3 : 1,
+        color: { color: s.rsp_seen ? '#9b8cf2' : '#4a4460', opacity: focusEdgeIds ? (isFocused ? 1 : DIM_EDGE) : 1 },
+        shadow: isFocused ? { enabled: true, color: 'rgba(232,163,61,0.6)', size: 10 } : { enabled: false },
+        label: s.rsp_seen ? 'SCAN \u2713' : 'SCAN\u2026',
+      };
+    });
+
+    const edgeUpdates = connEdgeUpdates.concat(scanEdgeUpdates);
+
+    const keepNodeIds = new Set(nodeUpdates.map(n => n.id));
+    nodes.getIds().forEach(id => {
+      if (id !== '__center__' && !keepNodeIds.has(id)) nodes.remove(id);
+    });
+    if (nodeUpdates.length) nodes.update(nodeUpdates);
+
+    const keepEdgeIds = new Set(edgeUpdates.map(e => e.id));
+    edges.getIds().forEach(id => { if (!keepEdgeIds.has(id)) edges.remove(id); });
+    if (edgeUpdates.length) edges.update(edgeUpdates);
+
+    document.getElementById('graph-empty').style.display = devices.length ? 'none' : 'flex';
+  }
+
+  // ---------------------------------------------------------------------
+  // Highlight picker -- pick a device, connection or scan from the
+  // dropdown and it glows on the radar while everything else fades.
+  // ---------------------------------------------------------------------
+
+  function focusLabelForDevice(d){
+    const id = identityFor(d);
+    const name = id.text ? (id.guessed ? id.text + ' (guessed)' : id.text) : shortAddr(d.addr);
+    const vendor = d.vendor ? ' \u00b7 ' + d.vendor : '';
+    const rssi = (d.rssi !== null && d.rssi !== undefined) ? ' \u00b7 ' + d.rssi + 'dBm' : '';
+    return name + vendor + rssi;
+  }
+
+  function selectHasValue(select, value){
+    for (let i = 0; i < select.options.length; i++){
+      if (select.options[i].value === value) return true;
+    }
+    return false;
+  }
+
+  function populateFocusOptions(devices, connections, scans){
+    const select = document.getElementById('focus-select');
+    const prevValue = select.value;
+
+    // Devices: strongest RSSI (closest) first -- "what's nearby" at a glance.
+    document.getElementById('focus-devices-group').innerHTML = devices.slice()
+      .sort((a, b) => (b.rssi ?? -999) - (a.rssi ?? -999))
+      .map(d => '<option value="' + escapeHtml(d.addr) + '">' + escapeHtml(focusLabelForDevice(d)) + '</option>')
+      .join('');
+
+    document.getElementById('focus-conns-group').innerHTML = connections
+      .filter(c => c.state !== 'ended')
+      .map(c => {
+        const initId = connEndpointIdentity(c.init_name, c.init_label);
+        const advId = connEndpointIdentity(c.adv_name, c.adv_label);
+        const label = (initId.text || shortAddr(c.init_addr)) + ' \u2192 ' + (advId.text || shortAddr(c.adv_addr)) +
+          ' \u00b7 ' + (CONN_STATE_META[c.state] || CONN_STATE_META.seen).label;
+        return '<option value="conn:' + escapeHtml(c.access_address) + '">' + escapeHtml(label) + '</option>';
+      }).join('');
+
+    document.getElementById('focus-scans-group').innerHTML = (scans || []).map(s => {
+      const label = shortAddr(s.scanner_addr) + ' \u2192 ' + shortAddr(s.adv_addr) +
+        (s.rsp_seen ? ' \u00b7 responded' : ' \u00b7 no response');
+      return '<option value="scan:' + escapeHtml(s.scanner_addr) + '>' + escapeHtml(s.adv_addr) + '">' + escapeHtml(label) + '</option>';
+    }).join('');
+
+    // Keep the current selection across the rebuild if it's still valid;
+    // otherwise the item aged out / disappeared -- release the highlight.
+    if (prevValue && !selectHasValue(select, prevValue)){
+      setFocus(null);
+    } else {
+      select.value = prevValue;
+    }
+  }
+
+  function setFocus(value){
+    if (!value){
+      focus = null;
+    } else if (value.startsWith('conn:')){
+      focus = { type: 'conn', value };
+    } else if (value.startsWith('scan:')){
+      focus = { type: 'scan', value };
+    } else {
+      focus = { type: 'device', value };
+    }
+    document.getElementById('focus-select').value = value || '';
+    document.getElementById('focus-clear').style.display = value ? 'flex' : 'none';
+    // Redraw immediately against the last known snapshot rather than
+    // waiting for the next poll, so the highlight feels instant.
+    updateGraph(lastDevicesList, lastConnectionsList, lastScansList);
+  }
+
+  document.getElementById('focus-select').addEventListener('change', (e) => setFocus(e.target.value));
+  document.getElementById('focus-clear').addEventListener('click', () => setFocus(null));
+
+  // ---------------------------------------------------------------------
+  // Tables
+  // ---------------------------------------------------------------------
+  const prevDeviceAges = new Map();
+  let lastDevicesList = [];              // most recent devices array, so we can re-render on sort/select without a new snapshot
+  let lastConnectionsList = [];          // ditto, for connections/scans -- used to redraw the graph instantly on focus change
+  let lastScansList = [];
+  let deviceSort = { col: 'age_sec', dir: 'asc' };
+  let selectedDeviceAddr = null;         // pinned/selected device address, or null
+
+  function deviceSortValue(d, col){
+    switch (col){
+      case 'addr':    return d.addr || '';
+      case 'name':    { const id = identityFor(d); return (id.text || '').toLowerCase(); }
+      case 'rssi':    return (d.rssi === null || d.rssi === undefined) ? -999 : d.rssi;
+      case 'channel': return (d.channel === null || d.channel === undefined) ? -1 : d.channel;
+      case 'age_sec': default: return d.age_sec;
+    }
+  }
+
+  function updateSortHeaderUI(){
+    document.querySelectorAll('#devices-head-row th[data-sort]').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      const arrow = th.querySelector('.sort-arrow');
+      if (th.dataset.sort === deviceSort.col){
+        th.classList.add(deviceSort.dir === 'asc' ? 'sort-asc' : 'sort-desc');
+        arrow.textContent = deviceSort.dir === 'asc' ? '\u2191' : '\u2193';
+      } else {
+        arrow.textContent = '';
+      }
+    });
+  }
+
+  document.querySelectorAll('#devices-head-row th[data-sort]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      if (deviceSort.col === col){
+        deviceSort.dir = deviceSort.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        deviceSort = { col, dir: 'asc' };
+      }
+      updateSortHeaderUI();
+      renderDevices(lastDevicesList);
+    });
+  });
+  updateSortHeaderUI();
+
+  // Clicking a row pins/selects that device: it's highlighted (and kept
+  // at the top of the list so it doesn't get lost as the table refreshes),
+  // and mirrors the pick into the "Highlight..." picker so the same device
+  // glows on the radar -- one selection, two places it shows up. Unpinning
+  // only clears the radar highlight if this device was actually driving
+  // it, so it doesn't stomp on a connection/scan picked via the dropdown.
+  document.getElementById('devices-body').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-addr]');
+    if (!tr) return;
+    const addr = tr.dataset.addr;
+    const wasSelected = selectedDeviceAddr === addr;
+    selectedDeviceAddr = wasSelected ? null : addr;
+    renderDevices(lastDevicesList);
+    if (wasSelected){
+      if (focus && focus.type === 'device' && focus.value === addr) setFocus(null);
+    } else {
+      setFocus(addr);
+    }
+  });
+
+  function renderDevices(devices){
+    lastDevicesList = devices;
+    const body = document.getElementById('devices-body');
+    document.getElementById('devices-badge').textContent = devices.length;
+    document.getElementById('device-count').textContent = devices.length;
+
+    if (!devices.length){
+      body.innerHTML = '<tr class="empty-row"><td colspan="5">No devices yet</td></tr>';
+      return;
+    }
+
+    if (selectedDeviceAddr && !devices.some(d => d.addr === selectedDeviceAddr)){
+      selectedDeviceAddr = null; // device dropped out of the snapshot, release the pin
+    }
+
+    const dir = deviceSort.dir === 'asc' ? 1 : -1;
+    const sorted = devices.slice().sort((a, b) => {
+      const va = deviceSortValue(a, deviceSort.col), vb = deviceSortValue(b, deviceSort.col);
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+
+    // pinned/selected device always floats to the top, regardless of sort
+    if (selectedDeviceAddr){
+      const idx = sorted.findIndex(d => d.addr === selectedDeviceAddr);
+      if (idx > 0){
+        const [sel] = sorted.splice(idx, 1);
+        sorted.unshift(sel);
+      }
+    }
+
+    body.innerHTML = sorted.map(d => {
+      const isNewSighting = !prevDeviceAges.has(d.addr);
+      prevDeviceAges.set(d.addr, d.age_sec);
+
+      const isSelected = d.addr === selectedDeviceAddr;
+      const staleClass = d.age_sec > FRESH_SEC ? ' stale' : '';
+      const flashClass = isNewSighting ? ' fresh-flash' : '';
+      const selectedClass = isSelected ? ' selected' : '';
+      const roleBadge = d.connected ? '<span class="badge-role conn">CONN</span>' : '';
+      const scannerBadge = d.scanner ? '<span class="badge-role scanner">SCN</span>' : '';
+      const pduBadge = (!d.connected && d.pdu_type)
+        ? '<span class="badge-pdu">' + escapeHtml(d.pdu_type.replace('ADV_', '').replace('_IND', '')) + '</span>'
+        : '';
+
+      // Name column: real advertised name > guessed identity (vendor +
+      // Apple Continuity frame type, from ble_identify.py) > "unknown".
+      const identity = identityFor(d);
+      let nameHtml;
+      if (identity.text && !identity.guessed){
+        nameHtml = '<span class="name">' + escapeHtml(identity.text) + '</span>';
+      } else if (identity.text && identity.guessed){
+        nameHtml = '<span class="name guess" title="Guessed from BLE manufacturer data (vendor/Continuity frame), not an advertised name">' +
+          '<span class="guess-tag">ID</span>' + escapeHtml(identity.text) + '</span>';
+      } else {
+        nameHtml = '<span class="name unknown">unknown</span>';
+      }
+
+      const pct = rssiToPct(d.rssi);
+      const pinTag = isSelected ? ' title="Pinned \u2014 click row to unpin"' : ' title="Click to pin this device to the top"';
+
+      return '<tr data-addr="' + escapeHtml(d.addr) + '" class="' + (staleClass + flashClass + selectedClass).trim() + '"' + pinTag + '>' +
+        '<td class="addr">' + escapeHtml(d.addr) + roleBadge + scannerBadge + pduBadge + '</td>' +
+        '<td>' + nameHtml + '</td>' +
+        '<td><div class="rssi-wrap"><div class="rssi-bar"><i style="width:' + pct + '%"></i></div>' +
+          '<span class="rssi-val">' + (d.rssi ?? '&mdash;') + '</span></div></td>' +
+        '<td class="mono">' + fmtChannel(d.channel) + '</td>' +
+        '<td class="mono">' + fmtAge(d.age_sec) + '</td>' +
+      '</tr>';
+    }).join('');
+
+    // prune tracking maps of devices no longer present
+    const present = new Set(devices.map(d => d.addr));
+    for (const key of Array.from(prevDeviceAges.keys())){
+      if (!present.has(key)) prevDeviceAges.delete(key);
+    }
+    for (const key of Array.from(deviceAngles.keys())){
+      if (!present.has(key)) deviceAngles.delete(key);
+    }
+  }
+
+  function renderConnections(connections, scans){
+    const body = document.getElementById('conns-body');
+    const total = connections.length + (scans ? scans.length : 0);
+    document.getElementById('conns-badge').textContent = total;
+    document.getElementById('conn-count').textContent = connections.length;
+    document.getElementById('scan-count').textContent = scans ? scans.length : 0;
+
+    if (!total){
+      body.innerHTML = '<tr class="empty-row"><td colspan="4">No connections or scans yet</td></tr>';
+      return;
+    }
+
+    const connRows = connections.map(c => {
+      const initId = connEndpointIdentity(c.init_name, c.init_label);
+      const advId = connEndpointIdentity(c.adv_name, c.adv_label);
+      const rssiBits = [];
+      if (c.stats && c.stats.rssi_central != null) rssiBits.push('C ' + c.stats.rssi_central + 'dBm');
+      if (c.stats && c.stats.rssi_peripheral != null) rssiBits.push('P ' + c.stats.rssi_peripheral + 'dBm');
+      const detailBits = [
+        '<span class="mono">' + escapeHtml(c.access_address) + '</span>',
+        'hop ' + c.hop_increment + ' &middot; ' + c.num_used_channels + '/37ch',
+        'up ' + fmtAge(c.duration_sec),
+        rssiBits.length ? rssiBits.join(' / ') : null,
+        c.state === 'ended' && c.end_reason ? escapeHtml(c.end_reason) : null,
+      ].filter(Boolean);
+      return {
+        kind: 'conn',
+        state: c.state,
+        age_sec: c.age_sec,
+        endpoints: endpointDisplay(c.init_name, c.init_label, c.init_addr) +
+          ' &rarr; ' + endpointDisplay(c.adv_name, c.adv_label, c.adv_addr),
+        detail: detailBits.join(' &middot; '),
+        stale: c.state === 'ended' || c.state === 'quiet',
+      };
+    });
+
+    const scanRows = (scans || []).map(s => ({
+      kind: 'scan',
+      state: null,
+      age_sec: s.age_sec,
+      endpoints: '<span class="addr">' + escapeHtml(shortAddr(s.scanner_addr)) + '</span> &rarr; ' +
+        '<span class="addr">' + escapeHtml(shortAddr(s.adv_addr)) + '</span>',
+      detail: s.rsp_seen ? 'responded' : 'req only, no rsp seen',
+      stale: !s.rsp_seen,
+    }));
+
+    const sorted = connRows.concat(scanRows).sort((a, b) => a.age_sec - b.age_sec);
+
+    body.innerHTML = sorted.map(r => {
+      const kindBadge = r.kind === 'conn'
+        ? '<span class="badge-kind kind-conn">CONN</span>' + (r.state ? connStateBadge(r.state) : '')
+        : '<span class="badge-kind kind-scan">SCAN</span>';
+      return '<tr class="' + (r.stale ? 'stale' : '') + '">' +
+        '<td>' + kindBadge + '</td>' +
+        '<td>' + r.endpoints + '</td>' +
+        '<td class="mono" style="font-size:11px;">' + r.detail + '</td>' +
+        '<td class="mono">' + fmtAge(r.age_sec) + '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  // ---------------------------------------------------------------------
+  // Channel activity lamps
+  // ---------------------------------------------------------------------
+  let lampTimers = {37:null, 38:null, 39:null};
+  function pulseLamp(ch){
+    const lamp = document.getElementById('lamp-' + ch);
+    if (!lamp) return;
+    lamp.classList.add('lit');
+    clearTimeout(lampTimers[ch]);
+    lampTimers[ch] = setTimeout(() => lamp.classList.remove('lit'), 900);
+  }
+
+  // ---------------------------------------------------------------------
+  // WebSocket
+  // ---------------------------------------------------------------------
+  const wsPill = document.getElementById('ws-pill');
+  const wsStatus = document.getElementById('ws-status');
+  let lastVersion = -1;
+  let reconnectDelay = 1000;
+
+  function setWsState(ok, text){
+    wsPill.classList.toggle('ok', ok);
+    wsPill.classList.toggle('bad', !ok);
+    wsStatus.textContent = text;
+  }
+
+  function connect(){
+    setWsState(false, 'connecting\u2026');
+    const ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+      setWsState(true, 'live');
+      reconnectDelay = 1000;
+    };
+
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (e) { return; }
+      if (msg.type !== 'snapshot') return;
+      if (msg.version === lastVersion) return;
+      lastVersion = msg.version;
+
+      const devices = msg.devices || [];
+      const connections = msg.connections || [];
+      const scans = msg.scans || [];
+      lastConnectionsList = connections;
+      lastScansList = scans;
+
+      const now = Date.now() / 1000;
+      devices.forEach(d => {
+        const ch = rfToAdvChannel(d.channel);
+        if (ch !== null && now - d.last_seen < 2){
+          pulseLamp(ch);
+        }
+      });
+
+      // Validate/refresh the highlight picker's options first, so a
+      // now-stale selection is released before updateGraph tries to draw it.
+      populateFocusOptions(devices, connections, scans);
+      updateGraph(devices, connections, scans);
+      renderDevices(devices);
+      renderConnections(connections, scans);
+    };
+
+    ws.onclose = () => {
+      setWsState(false, 'reconnecting\u2026');
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 1.6, 15000);
+    };
+
+    ws.onerror = () => { ws.close(); };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>
