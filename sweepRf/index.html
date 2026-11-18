@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLE Workshop · RF Spectrum</title>
+<style>
+:root {
+  --bg:     #090d13;
+  --bg2:    #0e1520;
+  --bg3:    #131d2c;
+  --border: #1b2b3e;
+  --ph:     #39ff14;
+  --adv:    #ff6b35;
+  --dat:    #38bdf8;
+  --text:   #b8ccd8;
+  --dim:    #3e5468;
+  --mono:   'JetBrains Mono','Fira Code','Courier New',monospace;
+  --panel:  270px;
+  --hdr:    40px;
+  --ctrl:   34px;
+  --stbar:  20px;
+  --sp-h:   220px;   /* initial spectrum height – JS overrides via inline style */
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:12px;overflow:hidden}
+
+#app{
+  display:grid;
+  grid-template-columns:1fr var(--panel);
+  grid-template-rows:var(--hdr) var(--ctrl) 1fr 6px var(--sp-h) var(--stbar);
+  grid-template-areas:
+    "hdr    hdr"
+    "ctrl   panel"
+    "wfall  panel"
+    "drag   panel"
+    "spec   panel"
+    "stbar  stbar";
+  height:100vh;
+}
+
+/* Drag handle */
+#drag{
+  grid-area:drag;background:var(--border);cursor:ns-resize;
+  display:flex;align-items:center;justify-content:center;
+  user-select:none;
+}
+#drag::after{
+  content:'';display:block;width:32px;height:2px;
+  background:var(--dim);border-radius:1px;
+}
+
+/* Header */
+#hdr{grid-area:hdr;display:flex;align-items:center;gap:18px;padding:0 14px;
+  background:var(--bg2);border-bottom:1px solid var(--border);}
+#hdr h1{font-size:13px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--ph);}
+.badge{padding:2px 7px;border-radius:2px;font-size:10px;letter-spacing:.07em;text-transform:uppercase;
+  border:1px solid var(--border);color:var(--dim);}
+.badge.live{border-color:var(--ph);color:var(--ph);}
+#freq-range{color:var(--dim);font-size:10px;margin-left:auto;}
+
+/* Controls */
+#ctrl{grid-area:ctrl;display:flex;align-items:center;gap:8px;padding:0 10px;
+  background:var(--bg3);border-bottom:1px solid var(--border);flex-wrap:nowrap;}
+.cl{font-size:10px;color:var(--dim);white-space:nowrap;}
+select,button{font-family:var(--mono);font-size:10px;background:var(--bg2);
+  color:var(--text);border:1px solid var(--border);border-radius:2px;padding:2px 6px;cursor:pointer;}
+button:hover{border-color:var(--ph);color:var(--ph);}
+.sep{width:1px;height:18px;background:var(--border);flex-shrink:0;}
+
+/* Smooth toggle */
+.tsw{position:relative;width:28px;height:14px;cursor:pointer;flex-shrink:0;}
+.tsw input{opacity:0;width:0;height:0;}
+.tsl{position:absolute;inset:0;background:var(--bg);border:1px solid var(--border);border-radius:7px;transition:.15s;}
+.tsl::before{content:'';position:absolute;left:2px;top:2px;width:8px;height:8px;
+  background:var(--dim);border-radius:50%;transition:.15s;}
+.tsw input:checked+.tsl{border-color:var(--ph);}
+.tsw input:checked+.tsl::before{background:var(--ph);transform:translateX(14px);}
+
+/* Waterfall */
+#wfall-wrap{grid-area:wfall;position:relative;overflow:hidden;background:#000;}
+#wfall{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated;}
+/* Channel label canvas sits on top of the waterfall */
+#wfall-labels{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+#ble-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;overflow:visible;}
+
+/* Spectrum */
+#spec-wrap{grid-area:spec;position:relative;background:var(--bg2);border-top:1px solid var(--border);}
+#spec{position:absolute;inset:0;width:100%;height:100%;}
+
+/* Panel */
+#panel{grid-area:panel;background:var(--bg2);border-left:1px solid var(--border);
+  display:flex;flex-direction:column;overflow:hidden;}
+.phdr{padding:5px 10px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--dim);border-bottom:1px solid var(--border);flex-shrink:0;}
+
+/* Legend */
+#ble-legend{flex-shrink:0;border-bottom:1px solid var(--border);padding:5px 7px;
+  display:flex;flex-wrap:wrap;gap:2px;}
+.ch-pill{display:inline-flex;align-items:center;padding:1px 4px;border-radius:2px;
+  font-size:9px;cursor:default;border:1px solid transparent;transition:all .15s;}
+.ch-pill.adv{color:var(--adv);border-color:rgba(255,107,53,.3);}
+.ch-pill.dat{color:var(--dim);border-color:var(--border);}
+.ch-pill.active{color:var(--dat);border-color:rgba(56,189,248,.5);background:rgba(56,189,248,.08);}
+
+/* AA table */
+#aa-section{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+.aa-row{padding:4px 10px;border-bottom:1px solid var(--border);animation:aaf .25s ease;}
+@keyframes aaf{from{background:rgba(56,189,248,.12);}to{background:transparent;}}
+.aa-val{color:var(--ph);font-size:11px;letter-spacing:.04em;}
+.aa-meta{display:flex;justify-content:space-between;margin-top:1px;align-items:center;}
+.aa-chans{color:var(--dat);font-size:9px;}
+.aa-age{color:var(--dim);font-size:9px;}
+.aa-adv .aa-val{color:var(--adv);}
+.aa-rate{font-size:9px;color:var(--dim);margin-left:6px;}
+.aa-rate.live{color:var(--dat);}
+.aa-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;
+  background:var(--dim);flex-shrink:0;}
+.aa-dot.live{background:var(--dat);animation:dotpulse 1s ease-in-out infinite;}
+@keyframes dotpulse{0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,.6);}50%{box-shadow:0 0 0 4px rgba(56,189,248,0);}}
+
+/* New-connection toast */
+#conn-toasts{position:absolute;top:8px;right:8px;z-index:5;display:flex;flex-direction:column;gap:4px;pointer-events:none;}
+.conn-toast{background:rgba(56,189,248,.12);border:1px solid rgba(56,189,248,.5);color:var(--dat);
+  font-size:10px;padding:4px 8px;border-radius:2px;letter-spacing:.04em;
+  animation:toastin .25s ease, toastout .4s ease 2.6s forwards;}
+@keyframes toastin{from{opacity:0;transform:translateX(8px);}to{opacity:1;transform:translateX(0);}}
+@keyframes toastout{to{opacity:0;}}
+
+/* Sweep ring drawn on the BLE svg overlay when a new connection is detected */
+.conn-ring{animation:ringgrow .9s ease-out forwards;}
+@keyframes ringgrow{from{r:2;opacity:.9;}to{r:46;opacity:0;}}
+
+/* Stats */
+#stats{flex-shrink:0;border-top:1px solid var(--border);padding:5px 10px;
+  display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;}
+.sl{color:var(--dim);font-size:9px;} .sv{color:var(--ph);font-size:10px;}
+
+/* Status bar */
+#stbar{grid-area:stbar;display:flex;align-items:center;gap:14px;padding:0 10px;
+  background:var(--bg);border-top:1px solid var(--border);font-size:10px;color:var(--dim);}
+#ws-st.ok{color:var(--ph);} #ws-st.err{color:#ef4444;}
+</style>
+</head>
+<body>
+<div id="app">
+
+<header id="hdr">
+  <h1>BLE · RF Spectrum</h1>
+  <span class="badge live">SWEEP</span>
+  <span class="badge" id="ble-badge">BLE</span>
+  <span id="freq-range">connecting…</span>
+</header>
+
+<div id="ctrl">
+  <span class="cl">Colormap</span>
+  <select id="cmap-sel">
+    <option value="thermal">Thermal</option>
+    <option value="viridis">Viridis</option>
+    <option value="grayscale">Greyscale</option>
+    <option value="inferno">Inferno</option>
+  </select>
+  <div class="sep"></div>
+  <span class="cl">Smooth</span>
+  <label class="tsw"><input type="checkbox" id="smooth-cb" checked><span class="tsl"></span></label>
+  <div class="sep"></div>
+  <span class="cl">dB</span>
+  <select id="db-sel">
+    <option value="-75,-30">−75…−30</option>
+    <option value="-100,-40">−100…−40</option>
+    <option value="-90,-40">−90…−40</option>
+    <option value="-80,-40">−80…−40</option>
+    <option value="-80,-50">−80…−50</option>
+  </select>
+  <div class="sep"></div>
+  <span class="cl">Max-hold</span>
+  <button id="mh-btn">OFF</button>
+  <button id="mh-reset">Reset</button>
+  <div class="sep"></div>
+  <span class="cl">Snapshot</span>
+  <select id="snap-sel">
+    <option value="0">off</option>
+    <option value="5">5 s</option>
+    <option value="10">10 s</option>
+    <option value="30">30 s</option>
+    <option value="60">60 s</option>
+  </select>
+  <button id="snap-export">Export</button>
+</div>
+
+<div id="wfall-wrap">
+  <canvas id="wfall"></canvas>
+  <canvas id="wfall-labels"></canvas>
+  <svg id="ble-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  <div id="conn-toasts"></div>
+</div>
+
+<div id="drag"></div>
+
+<div id="spec-wrap">
+  <canvas id="spec"></canvas>
+</div>
+
+<aside id="panel">
+  <div class="phdr">BLE Channels</div>
+  <div id="ble-legend"></div>
+  <div class="phdr">Active Devices</div>
+  <div id="aa-section"></div>
+  <div id="stats">
+    <span class="sl">Sweeps</span>  <span class="sv" id="s-sw">0</span>
+    <span class="sl">Sweep/s</span> <span class="sv" id="s-rate">—</span>
+    <span class="sl">Adv</span>     <span class="sv" id="s-adv">0</span>
+    <span class="sl">Data</span>    <span class="sv" id="s-dat">0</span>
+  </div>
+</aside>
+
+<div id="stbar">
+  <span id="ws-st" class="err">● disconnected</span>
+  <span id="st-bins">—</span>
+  <span id="st-snap">no snapshots</span>
+</div>
+
+</div>
+
+<script>
+'use strict';
+
+// ── Config (filled by server 'config' message before any draw) ──────────────
+let CFG = null;   // stays null until server sends config
+const ADV_SET = new Set([37, 38, 39]);
+
+// ── Colormaps ────────────────────────────────────────────────────────────────
+function mkCmap(stops) {
+  const out = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let lo = stops[0], hi = stops[stops.length - 1];
+    for (let s = 0; s < stops.length - 1; s++) {
+      if (t >= stops[s][0] && t <= stops[s+1][0]) { lo = stops[s]; hi = stops[s+1]; break; }
+    }
+    const u = hi[0] === lo[0] ? 0 : (t - lo[0]) / (hi[0] - lo[0]);
+    out[i*3]   = Math.round(lo[1] + u*(hi[1]-lo[1]));
+    out[i*3+1] = Math.round(lo[2] + u*(hi[2]-lo[2]));
+    out[i*3+2] = Math.round(lo[3] + u*(hi[3]-lo[3]));
+  }
+  return out;
+}
+const CMAPS = {
+  thermal:   mkCmap([[0,0,0,4],[.2,0,0,180],[.4,0,100,255],[.6,0,210,80],[.8,255,200,0],[1,255,255,255]]),
+  viridis:   mkCmap([[0,68,1,84],[.25,59,82,139],[.5,33,145,140],[.75,94,201,98],[1,253,231,37]]),
+  grayscale: mkCmap([[0,10,10,14],[1,240,240,240]]),
+  inferno:   mkCmap([[0,0,0,4],[.25,87,15,110],[.5,188,55,84],[.75,249,142,9],[1,252,255,164]]),
+};
+let cmap = CMAPS.thermal;
+let DB_MIN = -100, DB_MAX = -40;
+let smoothing = true;
+
+function dbToRGB(db) {
+  const idx = Math.max(0, Math.min(255, Math.round((db - DB_MIN) / (DB_MAX - DB_MIN) * 255)));
+  return [cmap[idx*3], cmap[idx*3+1], cmap[idx*3+2]];
+}
+
+// ── Canvas handles ────────────────────────────────────────────────────────────
+const wfCv  = document.getElementById('wfall');
+const wfLbl = document.getElementById('wfall-labels');
+const spCv  = document.getElementById('spec');
+const wfCtx = wfCv.getContext('2d');
+const wfLblCtx = wfLbl.getContext('2d');
+const spCtx = spCv.getContext('2d');
+let wfOff = null, wfOffCtx = null;
+
+const PAD = { top: 6, bot: 20, right: 40 };
+const GWIN = 2;   // Gaussian half-window in pixels
+const GWEIGHTS = (() => {
+  const w = [], sig2 = GWIN * GWIN;
+  for (let k = -GWIN; k <= GWIN; k++) w.push(Math.exp(-(k*k) / sig2));
+  const s = w.reduce((a,b) => a+b, 0);
+  return w.map(v => v/s);
+})();
+
+let lastBins   = [];
+let maxPx      = null;   // Float32Array, per-pixel max-hold
+let maxHoldOn  = false;
+let snapshots  = [];
+let snapTimer  = null;
+
+// ── Resize — only called AFTER CFG is set ────────────────────────────────────
+function resizeAll() {
+  if (!CFG) return;   // ← guard: never draw before config arrives
+
+  const ww = document.getElementById('wfall-wrap');
+  const sw = document.getElementById('spec-wrap');
+
+  const wW = ww.clientWidth,  wH = ww.clientHeight;
+  const sW = sw.clientWidth,  sH = sw.clientHeight;
+
+  if (wW === 0 || wH === 0 || sW === 0 || sH === 0) return;  // ← guard zero-size
+
+  wfCv.width  = wW; wfCv.height  = wH;
+  wfLbl.width = wW; wfLbl.height = wH;
+  spCv.width  = sW; spCv.height  = sH;
+
+  wfOff = document.createElement('canvas');
+  wfOff.width = wW; wfOff.height = wH;
+  wfOffCtx = wfOff.getContext('2d');
+
+  // Reset max-hold pixel array size
+  if (maxPx && maxPx.length !== wW - PAD.right) maxPx = null;
+
+  buildGuides();
+  drawWaterfallLabels();
+  if (lastBins.length) drawSpectrum(lastBins);
+}
+
+window.addEventListener('resize', resizeAll);
+// DO NOT call resizeAll here — wait for config message
+
+// ── Freq helpers ─────────────────────────────────────────────────────────────
+function f2px(freq, W) {
+  // Use bin-centre axis bounds, not the raw freq_start/stop edges.
+  // This eliminates the half-bin-width shift on all labels and guides.
+  return (freq - CFG.axis_start) / (CFG.axis_stop - CFG.axis_start) * W;
+}
+
+// ── Channel guide lines (SVG) ─────────────────────────────────────────────────
+function buildGuides() {
+  const svg = document.getElementById('ble-svg');
+  svg.querySelectorAll('.cg').forEach(e => e.remove());
+  if (!CFG) return;
+  const W = wfCv.width;
+  Object.entries(CFG.ble_channels).forEach(([ch, freq]) => {
+    const x = f2px(+freq, W);
+    const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+    line.setAttribute('class','cg');
+    line.setAttribute('x1', x); line.setAttribute('y1', 0);
+    line.setAttribute('x2', x); line.setAttribute('y2', '100%');
+    line.setAttribute('stroke', ADV_SET.has(+ch)
+      ? 'rgba(255,107,53,.25)' : 'rgba(56,189,248,.07)');
+    line.setAttribute('stroke-width', '1');
+    svg.appendChild(line);
+  });
+}
+
+// ── Channel number labels on waterfall canvas ─────────────────────────────────
+function drawWaterfallLabels() {
+  if (!CFG || wfLbl.width === 0) return;
+  const W = wfLbl.width;
+  wfLblCtx.clearRect(0, 0, W, wfLbl.height);
+  wfLblCtx.font = '9px JetBrains Mono,Fira Code,Courier New,monospace';
+  wfLblCtx.textAlign = 'center';
+
+  Object.entries(CFG.ble_channels).forEach(([ch, freq]) => {
+    const x = f2px(+freq, W);
+    const isAdv = ADV_SET.has(+ch);
+    // Tick mark at top
+    wfLblCtx.strokeStyle = isAdv ? 'rgba(255,107,53,.6)' : 'rgba(56,189,248,.3)';
+    wfLblCtx.lineWidth = 1;
+    wfLblCtx.beginPath();
+    wfLblCtx.moveTo(x, 0); wfLblCtx.lineTo(x, 6);
+    wfLblCtx.stroke();
+    // Label
+    wfLblCtx.fillStyle = isAdv ? 'rgba(255,107,53,.85)' : 'rgba(56,189,248,.5)';
+    wfLblCtx.fillText(isAdv ? `CH${ch}` : String(ch), x, 16);
+  });
+}
+
+// ── BLE legend pills ──────────────────────────────────────────────────────────
+function buildLegend() {
+  const el = document.getElementById('ble-legend');
+  el.innerHTML = '';
+  for (const ch of [37, 38, 39]) {
+    const p = document.createElement('span');
+    p.className = 'ch-pill adv'; p.id = `pill-${ch}`;
+    p.title = `CH${ch} · ${CFG.ble_channels[String(ch)]} MHz`;
+    p.textContent = `CH${ch}`;
+    el.appendChild(p);
+  }
+  for (let ch = 0; ch <= 36; ch++) {
+    const p = document.createElement('span');
+    p.className = 'ch-pill dat'; p.id = `pill-${ch}`;
+    p.title = `CH${ch} · ${CFG.ble_channels[String(ch)]} MHz`;
+    p.textContent = String(ch);
+    el.appendChild(p);
+  }
+}
+
+const pillTimers = {};
+function flashPill(ch) {
+  const p = document.getElementById(`pill-${ch}`);
+  if (!p) return;
+  p.classList.add('active');
+  clearTimeout(pillTimers[ch]);
+  pillTimers[ch] = setTimeout(() => p.classList.remove('active'), 2000);
+}
+
+// ── Waterfall ─────────────────────────────────────────────────────────────────
+function drawWaterfallRow(bins) {
+  if (!wfOffCtx || !CFG) return;
+  const W = wfCv.width, H = wfCv.height;
+  if (W === 0 || H === 0) return;
+  const uw = W - PAD.right;
+
+  // Per-pixel power
+  const px = new Float32Array(uw).fill(DB_MIN - 1);
+  for (const [freq, db] of bins) {
+    const hw = CFG.bin_width_mhz / 2;
+    const x0 = Math.max(0, Math.floor(f2px(freq - hw, uw)));
+    const x1 = Math.min(uw, Math.ceil (f2px(freq + hw, uw)));
+    for (let x = x0; x < x1; x++) px[x] = db;
+  }
+
+  const row = new ImageData(W, 1);
+  const d   = row.data;
+
+  for (let x = 0; x < uw; x++) {
+    let db;
+    if (smoothing) {
+      let acc = 0, ws = 0;
+      for (let k = -GWIN; k <= GWIN; k++) {
+        const xi = x + k;
+        if (xi < 0 || xi >= uw || px[xi] <= DB_MIN) continue;
+        const w = GWEIGHTS[k + GWIN]; acc += px[xi] * w; ws += w;
+      }
+      db = ws > 0 ? acc / ws : (px[x] > DB_MIN ? px[x] : DB_MIN);
+    } else {
+      db = px[x] > DB_MIN ? px[x] : DB_MIN;
+    }
+    const [r,g,b] = dbToRGB(db);
+    const i = x*4; d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=255;
+  }
+  // Right margin: solid bg colour
+  for (let x = uw; x < W; x++) {
+    const i = x*4; d[i]=9; d[i+1]=13; d[i+2]=19; d[i+3]=255;
+  }
+
+  // Scroll existing buffer down 1 row, paint new row at top
+  wfOffCtx.drawImage(wfOff, 0, 0, W, H-1, 0, 1, W, H-1);
+  wfOffCtx.putImageData(row, 0, 0);
+  // Blit offscreen + labels onto visible canvas
+  wfCtx.drawImage(wfOff, 0, 0);
+  wfCtx.drawImage(wfLbl, 0, 0);
+}
+
+// ── BLE flash queue (decoupled from message rate) ────────────────────────────
+let pendingFlashes = [];   // [{freq_mhz, isAdv}]
+let flashRAF = null;
+
+function queueBleFlash(freq_mhz, isAdv) {
+  pendingFlashes.push({ freq_mhz, isAdv });
+  if (flashRAF === null) flashRAF = requestAnimationFrame(flushBleFlashes);
+}
+
+function flushBleFlashes() {
+  flashRAF = null;
+  if (!wfOffCtx || !CFG || !pendingFlashes.length) { pendingFlashes = []; return; }
+  const W  = wfCv.width;
+  const uw = W - PAD.right;
+  const hw = CFG.bin_width_mhz / 2;
+  const batch = pendingFlashes;
+  pendingFlashes = [];
+
+  // Paint every queued flash onto the offscreen buffer first (cheap, no blits yet)
+  for (const { freq_mhz, isAdv } of batch) {
+    const [r,g,b] = isAdv ? [255,107,53] : [56,189,248];
+    const x0 = Math.max(0, Math.floor(f2px(freq_mhz - hw, uw)));
+    const x1 = Math.min(uw, Math.ceil (f2px(freq_mhz + hw, uw)));
+    if (x1 <= x0) continue;
+    const flash = new ImageData(x1-x0, 3);
+    const d = flash.data;
+    const a0 = isAdv ? 255 : 180;   // data flashes a touch dimmer (they're frequent)
+    for (let row = 0; row < 3; row++) {
+      const a = a0 - row * 60;
+      for (let col = 0; col < (x1-x0); col++) {
+        const i = (row*(x1-x0)+col)*4;
+        d[i]=r; d[i+1]=g; d[i+2]=b; d[i+3]=a;
+      }
+    }
+    wfOffCtx.putImageData(flash, x0, 0);
+  }
+  // Single blit for the whole batch, no matter how many packets arrived this frame
+  wfCtx.drawImage(wfOff, 0, 0);
+  wfCtx.drawImage(wfLbl, 0, 0);
+}
+
+// ── Spectrum ──────────────────────────────────────────────────────────────────
+function drawSpectrum(bins) {
+  if (!spCtx || !CFG || !bins.length) return;
+  if (spCv.width === 0 || spCv.height === 0) return;
+  lastBins = bins;
+
+  const W = spCv.width, H = spCv.height;
+  const uw = W - PAD.right;
+  const dbRange = DB_MAX - DB_MIN;
+
+  // Build per-pixel power
+  const px = new Float32Array(uw).fill(DB_MIN);
+  for (const [freq, db] of bins) {
+    const hw = CFG.bin_width_mhz / 2;
+    const x0 = Math.max(0, Math.floor(f2px(freq - hw, uw)));
+    const x1 = Math.min(uw, Math.ceil (f2px(freq + hw, uw)));
+    for (let x = x0; x < x1; x++) px[x] = db;
+  }
+
+  // Update max-hold
+  if (maxHoldOn) {
+    if (!maxPx || maxPx.length !== uw) {
+      maxPx = px.slice();
+    } else {
+      for (let x = 0; x < uw; x++) if (px[x] > maxPx[x]) maxPx[x] = px[x];
+    }
+  }
+
+  // Gaussian smooth
+  const spx = new Float32Array(uw);
+  if (smoothing) {
+    for (let x = 0; x < uw; x++) {
+      let acc = 0, ws = 0;
+      for (let k = -GWIN; k <= GWIN; k++) {
+        const xi = x+k; if (xi<0||xi>=uw) continue;
+        const w = GWEIGHTS[k+GWIN]; acc += px[xi]*w; ws += w;
+      }
+      spx[x] = ws > 0 ? acc/ws : px[x];
+    }
+  } else { spx.set(px); }
+
+  function dbY(db) {
+    return PAD.top + ((DB_MAX - Math.max(DB_MIN, Math.min(DB_MAX, db))) / dbRange) * (H - PAD.top - PAD.bot);
+  }
+
+  spCtx.clearRect(0, 0, W, H);
+
+  // Grid
+  spCtx.lineWidth = 1;
+  for (let db = DB_MAX; db >= DB_MIN; db -= 10) {
+    const y = dbY(db);
+    spCtx.strokeStyle = 'rgba(27,43,62,.9)';
+    spCtx.beginPath(); spCtx.moveTo(0, y); spCtx.lineTo(uw, y); spCtx.stroke();
+    spCtx.fillStyle   = 'rgba(62,84,104,.85)';
+    spCtx.font        = '9px JetBrains Mono,Fira Code,monospace';
+    spCtx.textAlign   = 'left';
+    spCtx.fillText(`${db}`, uw+3, y+3);
+  }
+
+  // BLE channel verticals
+  Object.entries(CFG.ble_channels).forEach(([ch, freq]) => {
+    const x = f2px(+freq, uw);
+    spCtx.strokeStyle = ADV_SET.has(+ch) ? 'rgba(255,107,53,.25)' : 'rgba(56,189,248,.1)';
+    spCtx.lineWidth = 1;
+    spCtx.beginPath(); spCtx.moveTo(x, PAD.top); spCtx.lineTo(x, H-PAD.bot); spCtx.stroke();
+  });
+
+  // Spectrum line
+  spCtx.beginPath();
+  for (let x = 0; x < uw; x++) x===0 ? spCtx.moveTo(x, dbY(spx[x])) : spCtx.lineTo(x, dbY(spx[x]));
+  spCtx.strokeStyle = '#39ff14'; spCtx.lineWidth = 1.5; spCtx.stroke();
+
+  // Max-hold line
+  if (maxHoldOn && maxPx && maxPx.length === uw) {
+    spCtx.beginPath();
+    for (let x = 0; x < uw; x++) x===0 ? spCtx.moveTo(x, dbY(maxPx[x])) : spCtx.lineTo(x, dbY(maxPx[x]));
+    spCtx.strokeStyle = 'rgba(255,107,53,.9)'; spCtx.lineWidth = 1; spCtx.stroke();
+  }
+
+  // Freq axis
+  spCtx.fillStyle = 'rgba(62,84,104,.85)';
+  spCtx.font      = '9px JetBrains Mono,Fira Code,monospace';
+  spCtx.textAlign = 'center';
+  const step = 10;
+  const f0 = Math.ceil(CFG.axis_start / step) * step;
+  for (let f = f0; f <= CFG.axis_stop; f += step) {
+    spCtx.fillText(f, f2px(f, uw), H - 5);
+  }
+}
+
+// ── AA tracker ────────────────────────────────────────────────────────────────
+const AA_TTL        = 8000;
+const RATE_WINDOW    = 4000;   // ms window used to compute pps
+const RATE_LIVE_MIN  = 1.5;    // pps threshold to call it "live" data activity
+const CONN_DATA_CHANS = 3;     // distinct data channels seen → treat as an active connection
+const aaMap  = new Map();
+
+function upsertAA(pkt) {
+  const { aa, channel, ts } = pkt;
+  const isAdv = ADV_SET.has(channel);
+  if (!aaMap.has(aa)) {
+    const row = document.createElement('div');
+    row.className = `aa-row${isAdv ? ' aa-adv' : ''}`;
+    const key = aa.replace(/\W/g,'');
+    row.innerHTML =
+      `<div class="aa-val"><span class="aa-dot" id="dot-${key}"></span>${aa}</div>
+       <div class="aa-meta">
+         <span class="aa-chans" id="ac-${key}"></span>
+         <span>
+           <span class="aa-rate" id="rt-${key}"></span>
+           <span class="aa-age"   id="aa-${key}"></span>
+         </span>
+       </div>`;
+    const sect = document.getElementById('aa-section');
+    sect.insertBefore(row, sect.firstChild);
+    aaMap.set(aa, { row, chans: new Set(), lastTs: ts, timer: null, pktTimes: [], isConn: false });
+  }
+  const e = aaMap.get(aa);
+  e.chans.add(channel); e.lastTs = ts;
+  e.pktTimes.push(performance.now());
+  clearTimeout(e.timer);
+  e.timer = setTimeout(() => { e.row.remove(); aaMap.delete(aa); }, AA_TTL);
+
+  const key = aa.replace(/\W/g,'');
+  const ac = document.getElementById(`ac-${key}`);
+  if (ac) ac.textContent = 'CH: ' + [...e.chans].sort((a,b)=>a-b)
+    .map(c => ADV_SET.has(c) ? `[${c}]` : c).join(' ');
+
+  // New-connection detection: an address hopping across enough distinct
+  // *data* channels (not just the 3 advertising ones) means it's an
+  // established connection, not just an advertiser.
+  if (!e.isConn && !isAdv) {
+    const dataChans = [...e.chans].filter(c => !ADV_SET.has(c));
+    if (dataChans.length >= CONN_DATA_CHANS) {
+      e.isConn = true;
+      triggerConnectionEffect(aa, pkt.freq_mhz);
+    }
+  }
+}
+
+setInterval(() => {
+  const now  = Date.now();
+  const hrNow = performance.now();
+  aaMap.forEach((e, aa) => {
+    const key = aa.replace(/\W/g,'');
+    e.pktTimes = e.pktTimes.filter(t => hrNow - t < RATE_WINDOW);
+    const pps  = e.pktTimes.length / (RATE_WINDOW / 1000);
+
+    const dot = document.getElementById(`dot-${key}`);
+    if (dot) dot.classList.toggle('live', pps >= RATE_LIVE_MIN);
+
+    const rt = document.getElementById(`rt-${key}`);
+    if (rt) {
+      rt.classList.toggle('live', pps >= RATE_LIVE_MIN);
+      rt.textContent = pps >= 0.1 ? `${pps.toFixed(1)}/s` : '';
+    }
+
+    const el = document.getElementById(`aa-${key}`);
+    if (el) {
+      const dt = (now - e.lastTs * 1000) / 1000;
+      el.textContent = dt < 60 ? `${dt.toFixed(1)}s` : `${(dt/60).toFixed(1)}m`;
+    }
+  });
+}, 500);
+
+// ── New-connection visual effect ──────────────────────────────────────────────
+function triggerConnectionEffect(aa, freq_mhz) {
+  // Toast
+  const toasts = document.getElementById('conn-toasts');
+  const t = document.createElement('div');
+  t.className = 'conn-toast';
+  t.textContent = `⬡ new connection · ${aa}`;
+  toasts.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+
+  // Expanding ring on the waterfall at the frequency where it was caught
+  if (!CFG) return;
+  const svg = document.getElementById('ble-svg');
+  const W = wfCv.width, uw = W - PAD.right;
+  const x = f2px(freq_mhz, uw);
+  const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  ring.setAttribute('cx', x);
+  ring.setAttribute('cy', 8);
+  ring.setAttribute('r', 2);
+  ring.setAttribute('fill', 'none');
+  ring.setAttribute('stroke', 'rgba(56,189,248,.9)');
+  ring.setAttribute('stroke-width', '2');
+  ring.setAttribute('class', 'conn-ring');
+  svg.appendChild(ring);
+  setTimeout(() => ring.remove(), 1000);
+}
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+document.getElementById('cmap-sel').addEventListener('change', e => {
+  cmap = CMAPS[e.target.value] || CMAPS.thermal;
+});
+document.getElementById('smooth-cb').addEventListener('change', e => {
+  smoothing = e.target.checked;
+});
+document.getElementById('db-sel').addEventListener('change', e => {
+  const [lo, hi] = e.target.value.split(',').map(Number);
+  DB_MIN = lo; DB_MAX = hi;
+});
+document.getElementById('mh-btn').addEventListener('click', () => {
+  maxHoldOn = !maxHoldOn;
+  document.getElementById('mh-btn').textContent = maxHoldOn ? 'ON' : 'OFF';
+  if (!maxHoldOn) maxPx = null;
+});
+document.getElementById('mh-reset').addEventListener('click', () => { maxPx = null; });
+document.getElementById('snap-sel').addEventListener('change', e => {
+  clearInterval(snapTimer);
+  const s = +e.target.value;
+  if (s > 0) snapTimer = setInterval(() => {
+    if (maxPx) {
+      snapshots.push({ ts: Date.now(), data: Array.from(maxPx),
+        freq_start: CFG.freq_start_mhz, freq_stop: CFG.freq_stop_mhz });
+      document.getElementById('st-snap').textContent =
+        `${snapshots.length} snapshot${snapshots.length>1?'s':''}`;
+    }
+  }, s * 1000);
+});
+document.getElementById('snap-export').addEventListener('click', () => {
+  if (!snapshots.length) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(snapshots,null,2)],{type:'application/json'}));
+  a.download = `maxhold_${Date.now()}.json`; a.click();
+});
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+let sweepCount = 0, advCount = 0, datCount = 0, sweepTimes = [];
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen  = () => {
+    document.getElementById('ws-st').textContent = '● connected';
+    document.getElementById('ws-st').className = 'ok';
+  };
+  ws.onclose = () => {
+    document.getElementById('ws-st').textContent = '● disconnected';
+    document.getElementById('ws-st').className = 'err';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onmessage = ev => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+
+    // ── Config: always first message; triggers initial layout ──────────────
+    if (msg.type === 'config') {
+      CFG = {
+        freq_start_mhz: msg.freq_start_mhz,
+        freq_stop_mhz:  msg.freq_stop_mhz,
+        bin_width_mhz:  msg.bin_width_mhz,
+        ble_channels:   msg.ble_channels,   // keys are strings
+        // Axis bounds = centre of first bin … centre of last bin
+        // hackrf_sweep bin centres: hz_low + bin_w*(i+0.5)
+        // So first centre = freq_start + bin_w/2, last = freq_stop - bin_w/2
+        axis_start: msg.freq_start_mhz + msg.bin_width_mhz / 2,
+        axis_stop:  msg.freq_stop_mhz  - msg.bin_width_mhz / 2,
+      };
+      document.getElementById('freq-range').textContent =
+        `${CFG.axis_start}–${CFG.axis_stop} MHz · ${CFG.bin_width_mhz} MHz bins`;
+      buildLegend();
+      resizeAll();   // ← first and only call; canvas dimensions are now valid
+      return;
+    }
+
+    // Ignore all draw messages until config has been received
+    if (!CFG) return;
+
+    if (msg.type === 'sweep') {
+      drawWaterfallRow(msg.bins);
+      drawSpectrum(msg.bins);
+      sweepCount++;
+      document.getElementById('s-sw').textContent = sweepCount;
+      document.getElementById('st-bins').textContent = `${msg.bins.length} bins`;
+      const now = Date.now();
+      sweepTimes.push(now);
+      sweepTimes = sweepTimes.filter(t => now-t < 2000);
+      document.getElementById('s-rate').textContent = (sweepTimes.length/2).toFixed(1);
+      return;
+    }
+
+    if (msg.type === 'ble_packet') {
+      queueBleFlash(msg.freq_mhz, ADV_SET.has(msg.channel));
+      flashPill(msg.channel);
+      upsertAA(msg);
+      if (ADV_SET.has(msg.channel)) advCount++; else datCount++;
+      document.getElementById('s-adv').textContent = advCount;
+      document.getElementById('s-dat').textContent = datCount;
+      return;
+    }
+  };
+}
+
+// ── Spectrum resize handle ────────────────────────────────────────────────────
+(function() {
+  const handle = document.getElementById('drag');
+  const app    = document.getElementById('app');
+  const MIN_SP = 80, MAX_SP = 500;
+  let dragging = false, startY = 0, startSp = 0;
+
+  function getSpH() {
+    // Read current spectrum row height from computed grid
+    const rows = getComputedStyle(app).gridTemplateRows.split(' ');
+    // rows: [hdr, ctrl, wfall, drag(6px), spec, stbar]
+    return parseFloat(rows[4]) || 220;
+  }
+  function setSpH(h) {
+    h = Math.max(MIN_SP, Math.min(MAX_SP, h));
+    app.style.gridTemplateRows =
+      `var(--hdr) var(--ctrl) 1fr 6px ${h}px var(--stbar)`;
+    resizeAll();  // rAF-deferred, safe to call repeatedly during drag
+  }
+
+  handle.addEventListener('mousedown', e => {
+    dragging = true; startY = e.clientY; startSp = getSpH();
+    document.body.style.cursor = 'ns-resize';
+    document.body.style.userSelect = 'none';
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    setSpH(startSp - (e.clientY - startY));  // drag up = bigger spectrum
+  });
+  window.addEventListener('mouseup', () => {
+    dragging = false;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  });
+})();
+
+connect();
+</script>
+</body>
+</html>
